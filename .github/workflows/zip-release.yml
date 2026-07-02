@@ -1,0 +1,59 @@
+name: Release Source ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  zip:
+    name: Package & Release ZIP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create source ZIP
+        run: |
+          VERSION="${GITHUB_REF_NAME:-v1.0.0}"
+          ZIP_NAME="VirtOS_Android_${VERSION}.zip"
+          zip -r "$ZIP_NAME" . \
+            --exclude "node_modules/*" \
+            --exclude ".expo/*" \
+            --exclude "android/*" \
+            --exclude "ios/*" \
+            --exclude ".git/*"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          ls -lh "$ZIP_NAME"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtOS-Source-${{ github.ref_name }}
+          path: '*.zip'
+
+      - name: Create GitHub Release with ZIP
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Virt OS ${{ github.ref_name }}"
+          body: |
+            ## Virt OS ${{ github.ref_name }} — Source Release
+
+            Download the ZIP, run `npm install`, then build the APK with EAS.
+
+            ```bash
+            npm install
+            npm install -g eas-cli
+            eas login
+            npm run build:apk
+            ```
+
+            See README.md for full instructions.
+          files: '*.zip'
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
