@@ -1,0 +1,134 @@
+name: Build & Release Virt OS APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.1)'
+        required: false
+        default: 'v1.0.0'
+
+jobs:
+  build:
+    name: Build APK with EAS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      - name: Build APK via EAS
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --no-wait \
+            --json > build_output.json
+          echo "Build submitted! Check https://expo.dev for status."
+          cat build_output.json
+
+      - name: Wait for build and download APK
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          echo "Waiting for build to complete (this takes 5-15 minutes)..."
+          BUILD_ID=$(cat build_output.json | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); console.log(JSON.parse(d)[0]?.id || '')")
+          echo "Build ID: $BUILD_ID"
+
+          for i in $(seq 1 60); do
+            STATUS=$(eas build:view $BUILD_ID --json 2>/dev/null | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); try { console.log(JSON.parse(d)?.status || 'UNKNOWN') } catch(e) { console.log('UNKNOWN') }" || echo "UNKNOWN")
+            echo "[$i/60] Status: $STATUS"
+            if [ "$STATUS" = "FINISHED" ]; then
+              echo "Build complete!"
+              break
+            elif [ "$STATUS" = "ERRORED" ] || [ "$STATUS" = "CANCELED" ]; then
+              echo "Build failed with status: $STATUS"
+              exit 1
+            fi
+            sleep 30
+          done
+
+          # Download APK
+          DOWNLOAD_URL=$(eas build:view $BUILD_ID --json 2>/dev/null | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); try { console.log(JSON.parse(d)?.artifacts?.buildUrl || '') } catch(e) { console.log('') }")
+          echo "Download URL: $DOWNLOAD_URL"
+          if [ -n "$DOWNLOAD_URL" ]; then
+            curl -L "$DOWNLOAD_URL" -o VirtOS_${{ github.ref_name }}.apk
+            echo "APK downloaded: VirtOS_${{ github.ref_name }}.apk"
+          fi
+
+      - name: Create ZIP with source + APK
+        run: |
+          mkdir -p dist
+          # Copy APK if it exists
+          if ls *.apk 1>/dev/null 2>&1; then
+            cp *.apk dist/
+          fi
+          # Create source ZIP (no node_modules)
+          zip -r dist/VirtOS_Source_${{ github.ref_name }}.zip . \
+            --exclude "node_modules/*" \
+            --exclude ".expo/*" \
+            --exclude "android/*" \
+            --exclude "ios/*" \
+            --exclude "dist/*" \
+            --exclude ".git/*"
+          ls -la dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtOS-APK-${{ github.ref_name }}
+          path: dist/
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Virt OS ${{ github.ref_name }}"
+          body: |
+            ## Virt OS ${{ github.ref_name }}
+
+            ### What's new
+            - See commit history for changes
+
+            ### Installation
+            1. Download `VirtOS_${{ github.ref_name }}.apk`
+            2. Enable "Unknown sources" on Android
+            3. Install the APK
+            4. Set Virt OS as your default home app
+
+            ### Features
+            - 🎬 Boot Animation
+            - 🔒 Lock Screen (swipe up)
+            - 🏠 Home Screen with Notification Center, App Drawer, Recent Apps
+            - ✦ Virt AI — 100% free, 6 agents (GPT-4o, Mistral, Llama, DeepSeek...)
+            - 🛍 Virt Store — 12 real free apps & games
+            - 📷 Camera, ⚙ Settings, 🕐 Clock, ⌗ Calculator
+
+            ### Built with
+            Expo 53 + React Native 0.79 + EAS Build
+          files: |
+            dist/*.apk
+            dist/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
