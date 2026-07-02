@@ -1,0 +1,7 @@
+id=virtos
+name=Virt OS
+version=v1.0.0
+versionCode=1
+author=DonvxDev
+description=Virt OS — Full Android Launcher OS. Replaces system home screen with Virt OS.
+minMagisk=20400
