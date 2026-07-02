@@ -1,23 +1,18 @@
-name: Build & Release Virt OS APK
+name: Build & Release Virt OS ROM
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag (e.g. v1.0.1)'
-        required: false
-        default: 'v1.0.0'
 
 jobs:
-  build:
-    name: Build APK with EAS
+  build-rom:
+    name: Build APK → Package ROM ZIPs → Release
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js 20
@@ -32,7 +27,9 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Build APK via EAS
+      # ── Step 1: Build APK via EAS ──────────────────────────
+      - name: Submit EAS build
+        id: eas_build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -40,94 +37,129 @@ jobs:
             --platform android \
             --profile preview \
             --non-interactive \
+            --json > build_output.json 2>&1 || \
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
             --no-wait \
             --json > build_output.json
-          echo "Build submitted! Check https://expo.dev for status."
           cat build_output.json
+          BUILD_ID=$(node -e "
+            const d = require('fs').readFileSync('build_output.json','utf8');
+            try { const j=JSON.parse(d); console.log((Array.isArray(j)?j[0]:j)?.id||''); }
+            catch(e){console.log('')}
+          ")
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "EAS Build ID: $BUILD_ID"
 
-      - name: Wait for build and download APK
+      - name: Wait for APK build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          echo "Waiting for build to complete (this takes 5-15 minutes)..."
-          BUILD_ID=$(cat build_output.json | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); console.log(JSON.parse(d)[0]?.id || '')")
-          echo "Build ID: $BUILD_ID"
-
+          BUILD_ID="${{ steps.eas_build.outputs.build_id }}"
+          echo "Polling build $BUILD_ID (up to 30 min)..."
           for i in $(seq 1 60); do
-            STATUS=$(eas build:view $BUILD_ID --json 2>/dev/null | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); try { console.log(JSON.parse(d)?.status || 'UNKNOWN') } catch(e) { console.log('UNKNOWN') }" || echo "UNKNOWN")
-            echo "[$i/60] Status: $STATUS"
-            if [ "$STATUS" = "FINISHED" ]; then
-              echo "Build complete!"
-              break
-            elif [ "$STATUS" = "ERRORED" ] || [ "$STATUS" = "CANCELED" ]; then
-              echo "Build failed with status: $STATUS"
-              exit 1
+            INFO=$(eas build:view "$BUILD_ID" --json 2>/dev/null || echo '{}')
+            STATUS=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).status||'UNKNOWN')}catch(e){console.log('UNKNOWN')}" <<< "$INFO")
+            echo "[$i/60] $STATUS"
+            if [ "$STATUS" = "FINISHED" ]; then break; fi
+            if [ "$STATUS" = "ERRORED" ] || [ "$STATUS" = "CANCELED" ]; then
+              echo "Build $STATUS"; exit 1
             fi
             sleep 30
           done
 
-          # Download APK
-          DOWNLOAD_URL=$(eas build:view $BUILD_ID --json 2>/dev/null | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); try { console.log(JSON.parse(d)?.artifacts?.buildUrl || '') } catch(e) { console.log('') }")
-          echo "Download URL: $DOWNLOAD_URL"
-          if [ -n "$DOWNLOAD_URL" ]; then
-            curl -L "$DOWNLOAD_URL" -o VirtOS_${{ github.ref_name }}.apk
-            echo "APK downloaded: VirtOS_${{ github.ref_name }}.apk"
-          fi
+          URL=$(eas build:view "$BUILD_ID" --json 2>/dev/null | \
+            node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));console.log(d.artifacts?.buildUrl||'')}catch(e){console.log('')}")
+          echo "Download URL: $URL"
+          [ -n "$URL" ] && curl -L "$URL" -o VirtOS.apk && echo "APK ready: $(du -h VirtOS.apk)"
 
-      - name: Create ZIP with source + APK
+      # ── Step 2: Package TWRP + Magisk ZIPs ─────────────────
+      - name: Package ROM ZIPs
         run: |
           mkdir -p dist
-          # Copy APK if it exists
-          if ls *.apk 1>/dev/null 2>&1; then
-            cp *.apk dist/
-          fi
-          # Create source ZIP (no node_modules)
-          zip -r dist/VirtOS_Source_${{ github.ref_name }}.zip . \
-            --exclude "node_modules/*" \
-            --exclude ".expo/*" \
-            --exclude "android/*" \
-            --exclude "ios/*" \
-            --exclude "dist/*" \
-            --exclude ".git/*"
-          ls -la dist/
 
-      - name: Upload APK artifact
+          # Copy APK into ROM structure
+          mkdir -p rom/system/priv-app/VirtOS
+          [ -f VirtOS.apk ] && cp VirtOS.apk rom/system/priv-app/VirtOS/VirtOS.apk
+
+          VERSION="${{ github.ref_name }}"
+
+          # ── TWRP flashable ZIP ──
+          cd rom
+          zip -r "../dist/VirtOS_TWRP_${VERSION}.zip" . \
+            --exclude "*.md"
+          cd ..
+          echo "TWRP ZIP: $(du -h dist/VirtOS_TWRP_${VERSION}.zip)"
+
+          # ── Magisk module ZIP ──
+          # Magisk needs: META-INF, system, module.prop, customize.sh, service.sh, post-fs-data.sh
+          cd rom
+          zip -r "../dist/VirtOS_Magisk_${VERSION}.zip" \
+            META-INF/ system/ module.prop customize.sh service.sh post-fs-data.sh
+          cd ..
+          echo "Magisk ZIP: $(du -h dist/VirtOS_Magisk_${VERSION}.zip)"
+
+          # ── Standalone APK ──
+          [ -f VirtOS.apk ] && cp VirtOS.apk "dist/VirtOS_${VERSION}.apk"
+
+          ls -lh dist/
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: VirtOS-APK-${{ github.ref_name }}
+          name: VirtOS-ROM-${{ github.ref_name }}
           path: dist/
-          retention-days: 30
+          retention-days: 90
 
+      # ── Step 3: GitHub Release ──────────────────────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: "Virt OS ${{ github.ref_name }}"
+          name: "🚀 Virt OS ${{ github.ref_name }}"
           body: |
-            ## Virt OS ${{ github.ref_name }}
+            ## Virt OS ${{ github.ref_name }} — ROM Release
 
-            ### What's new
-            - See commit history for changes
+            ### 📦 Downloads
 
-            ### Installation
-            1. Download `VirtOS_${{ github.ref_name }}.apk`
-            2. Enable "Unknown sources" on Android
-            3. Install the APK
-            4. Set Virt OS as your default home app
+            | File | Description |
+            |------|-------------|
+            | `VirtOS_TWRP_${{ github.ref_name }}.zip` | Flash via TWRP / OrangeFox |
+            | `VirtOS_Magisk_${{ github.ref_name }}.zip` | Install via Magisk (no wipe) |
+            | `VirtOS_${{ github.ref_name }}.apk` | Standalone APK |
 
-            ### Features
+            ---
+
+            ### 🔧 How to Flash
+
+            **Magisk (Easiest — no wipe needed):**
+            1. Open Magisk → Modules → Install from storage
+            2. Select `VirtOS_Magisk_${{ github.ref_name }}.zip`
+            3. Reboot → Home button → Select **Virt OS** → Always
+
+            **TWRP:**
+            1. Boot into TWRP recovery
+            2. Install → Select `VirtOS_TWRP_${{ github.ref_name }}.zip` → Flash
+            3. Reboot → Home button → Select **Virt OS** → Always
+
+            ---
+
+            ### ✨ Features
             - 🎬 Boot Animation
             - 🔒 Lock Screen (swipe up)
-            - 🏠 Home Screen with Notification Center, App Drawer, Recent Apps
-            - ✦ Virt AI — 100% free, 6 agents (GPT-4o, Mistral, Llama, DeepSeek...)
-            - 🛍 Virt Store — 12 real free apps & games
-            - 📷 Camera, ⚙ Settings, 🕐 Clock, ⌗ Calculator
+            - 🏠 Home Screen + Notification Center + App Drawer + Recent Apps
+            - ✦ Virt AI — 100% free (GPT-4o / Mistral / Llama / DeepSeek / SearchGPT)
+            - 🛍 Virt Store — Minecraft, Geometry Dash, Roblox, Brawl Stars + more
+            - 📷 Camera · ⚙ Settings · 🕐 Clock · ⌗ Calculator
 
-            ### Built with
-            Expo 53 + React Native 0.79 + EAS Build
+            ---
+
+            **Minimum:** Android 6.0 (API 23) · No root required for APK version
           files: |
-            dist/*.apk
             dist/*.zip
+            dist/*.apk
           draft: false
           prerelease: false
         env:
