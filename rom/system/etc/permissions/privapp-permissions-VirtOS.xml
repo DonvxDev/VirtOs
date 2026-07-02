@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Privileged app permissions for Virt OS
+  Allows Virt OS to act as a full system launcher
+-->
+<permissions>
+    <privapp-permissions package="dev.donvx.virtos">
+        <!-- Core launcher permissions -->
+        <permission name="android.permission.BIND_WALLPAPER"/>
+        <permission name="android.permission.READ_WALLPAPER_INTERNAL"/>
+        <permission name="android.permission.SET_WALLPAPER"/>
+        <permission name="android.permission.SET_WALLPAPER_HINTS"/>
+        <permission name="android.permission.EXPAND_STATUS_BAR"/>
+        <permission name="android.permission.MANAGE_ACTIVITY_TASKS"/>
+        <permission name="android.permission.GET_TASKS"/>
+        <permission name="android.permission.REORDER_TASKS"/>
+        <!-- System UI -->
+        <permission name="android.permission.STATUS_BAR"/>
+        <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+        <permission name="android.permission.PACKAGE_USAGE_STATS"/>
+        <!-- Notification -->
+        <permission name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+        <permission name="android.permission.FOREGROUND_SERVICE"/>
+    </privapp-permissions>
+</permissions>
